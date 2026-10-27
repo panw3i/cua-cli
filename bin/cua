@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run cua.mjs on the Node that LCU recorded from the installed ChatGPT app.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink -- "$self") || break
+  case $link in /*) self=$link ;; *) self=${self%/*}/$link ;; esac
+done
+root=${self%/*}/..
+lcu=${LCU_HOME:-$HOME/.local/share/lcu/current}
+node=
+[ -r "$lcu/node-path" ] && IFS= read -r node < "$lcu/node-path"
+if [ -z "$node" ] || [ ! -x "$node" ]; then
+  printf 'cua: LCU is not installed at %s (or its Node is missing). Run install.sh.\n' "$lcu" >&2
+  exit 2
+fi
+exec "$node" "$root/cua.mjs" "$@"

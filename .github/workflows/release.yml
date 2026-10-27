@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    # Standard Apple Silicon runner. Public repositories are not billed for it.
+    # Do not switch this to macos-15-large or macos-15-xlarge; those are billed
+    # even on public repositories.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Sign and notarize
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PWD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "missing secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          app="build/CUA.app"
+          [ -d "$app" ] || { echo "build.sh did not produce $app" >&2; exit 1; }
+
+          keychain="$RUNNER_TEMP/cua-sign.keychain-db"
+          cert="$RUNNER_TEMP/cert.p12"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$cert"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$cert"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$cert" -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
+          if [ -z "$identity" ]; then
+            echo "imported certificate has no codesigning identity" >&2
+            exit 1
+          fi
+          echo "signing with: $identity"
+
+          # Replace the ad-hoc signature from build.sh.
+          codesign --force --options runtime --timestamp --sign "$identity" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          zip="$RUNNER_TEMP/notarize.zip"
+          submit="$RUNNER_TEMP/notary.json"
+          ditto -c -k --keepParent "$app" "$zip"
+          set +e
+          xcrun notarytool submit "$zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 30m \
+            --output-format json >"$submit"
+          status=$?
+          set -e
+          python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=2))' "$submit" || cat "$submit"
+          if [ "$status" -ne 0 ]; then
+            id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$submit" 2>/dev/null || true)
+            if [ -n "${id:-}" ]; then
+              echo "Apple notary log for $id" >&2
+              xcrun notarytool log "$id" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit "$status"
+          fi
+
+          xcrun stapler staple "$app"
+          ditto -c -k --keepParent "$app" "dist/CUA-${VERSION}.zip"
+          echo "notarized dist/CUA-${VERSION}.zip"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" "dist/CUA-${VERSION}.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Developer ID 签名并已公证。下载 CUA-${VERSION}.zip 后可以直接打开。"
