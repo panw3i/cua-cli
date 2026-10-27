@@ -28,18 +28,25 @@ jobs:
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PWD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PWD APPLE_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "missing secret: $name" >&2
               exit 1
             fi
           done
+          for name in APPLE_ID APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "missing variable: $name" >&2
+              exit 1
+            fi
+          done
+          # The temporary keychain is deleted when the job ends.
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
 
           app="build/CUA.app"
           [ -d "$app" ] || { echo "build.sh did not produce $app" >&2; exit 1; }
